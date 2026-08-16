@@ -1,21 +1,25 @@
-"""Kaggriculture agent v1 - wheat monoculture.
+"""Kaggriculture agent v3.2 - disciplined melon waves + late wheat filler.
 
-Strategy:
-- Plant WHEAT on every unlocked tile; water the planting day and daily through
-  the bonus window so yield peaks at 4 units on day 4.
-- Harvest on day 4, but only AFTER that day's final watering (the bonus lands
-  then); harvest any day-5+ straggler before decay eats it.
-- Sell in batches of 50. Wheat absorbs gluts well (log shape, 0.20 target
-  above I0) so aggressive selling costs little.
-- Buy the three extra quadrants (NE 1k, SW 2k, SE 4k) when the current farm is
-  ~75% full; each 5x5 quadrant adds ~$400-500/day of wheat revenue.
-- Hire farm hands proportional to the workload (fib costs; ~6 tiles per unit).
-- Strict per-unit zones: units only service their own sub-zone (cross-zone
-  help costs more movement than it saves), ranked by urgency: survival water,
-  final-bonus-day water, harvest, window water, pre-window water, plant, dig.
-- Planting is capped per day and gated per zone on watering being caught up,
-  so the farm grows at its watering pace instead of overextending.
+Melon economics (base $250, seed $80, 6 units at age 10 -> ~$1.4k/tile) are
+the best in the game, but the sq glut curve hits the $1 floor after ~158
+cumulative units sold (price = 250 - (n/100)^2 style). So the money is in
+BOUNDED waves, never a continuous farm: plant only inside wave windows,
+cap alive plants, and let the market recover between waves.
+
+Window structure (a melon needs 10 days to mature):
+  Half A: plant days 0-1   -> harvest days 10-11
+          plant days 10-11 -> harvest days 20-21
+  Half B: plant days 5-6   -> harvest days 15-16
+          plant days 15-16 -> harvest days 25-26
+Wave 3 on any tile matures past day 30 - never planted.
+Sold in batches of 10 as harvested; the market self-limits at ~120 units.
+
+Wheat filler: the farmer is idle from day 21 on, so days 18-25 plant
+wheat in the leftover NW tiles (2 full 4-day cycles -> ~+1.5k). Wheat's
+log curve barely moves with 100-200 units and never touches melon stock.
 """
+
+
 
 from __future__ import annotations
 import math
@@ -24,16 +28,23 @@ SEED_COST = {"WHEAT": 10, "CARROT": 20, "TOMATO": 50, "STRAWBERRY": 100, "MELON"
 MAX_YIELD_DAY = {"WHEAT": 4, "CARROT": 3, "TOMATO": 11, "STRAWBERRY": 16, "MELON": 10}
 ONGOING = {"TOMATO", "STRAWBERRY"}
 
-CROP = "WHEAT"
+CROP = "MELON"
 LAND_COST = {"NE": 1000, "SW": 2000, "SE": 4000}
-MAX_HANDS = 8
-TILES_PER_UNIT = 6
-PLANT_CAP = 15
-RESERVE = 400
-SELL_BATCH = 50
-SELL_THRESHOLD = 50
+MAX_HANDS = 3
+PLANT_CAP = 20
+RESERVE = 100
+SELL_BATCH = 10
+SELL_THRESHOLD = 10
 MAX_MARKET_ORDERS = 10
-LAND_DEADLINE_DAY = 20
+LAND_DEADLINE_DAY = 99
+MAX_GEESE = 6
+FEED_RESERVE = 25
+SHED_TILES = [(4, 4), (5, 4), (4, 5), (5, 5)]
+
+# wave windows: (start_day, end_day) per half of the farm
+HALF_A_WINDOWS = [(0, 1), (10, 11)]
+HALF_B_WINDOWS = [(5, 6), (15, 16)]
+WAVE_TARGET = 11          # max alive melons per half
 
 
 def fib(n):
@@ -44,7 +55,6 @@ def fib(n):
 
 
 def _zones(tiles, n_units):
-    """One contiguous sub-zone per unit, quadrant-major, shed-nearest first."""
     board = len(tiles)
     half = board // 2
     unlocked = [(x, y) for y in range(board) for x in range(board)
@@ -78,6 +88,10 @@ def _zones(tiles, n_units):
     return zones[:n_units]
 
 
+def _in_windows(day, windows):
+    return any(a <= day <= b for (a, b) in windows)
+
+
 def agent(obs):
     me = obs["farms"][obs["player"]]
     private = obs["private"]
@@ -85,6 +99,7 @@ def agent(obs):
     money = me["money"]
     board = len(me["tiles"])
     tiles = me["tiles"]
+    fx, fy = me["farmer"]
 
     shed = private.get("shed", {})
     seeds = private.get("seeds", {})
@@ -115,14 +130,30 @@ def agent(obs):
                     market.append(["BUY_LAND"])
                 break
 
-    have = seeds.get(CROP, 0)
-    if have < len(empty):
-        afford = max(0, (money - RESERVE) // SEED_COST[CROP])
-        if afford > 0:
-            market.append(["BUY_SEED", CROP, min(len(empty) - have, afford)])
+    # seeds: only top up inside a wave window; the alive count only counts
+    # MATURING melons (age < 10) so a wave being harvested frees capacity
+    # for the next wave's planting on the same day.
+    n_melons = len(plants)
+    if _in_windows(day, HALF_A_WINDOWS + HALF_B_WINDOWS) and n_melons < 2 * WAVE_TARGET:
+        have = seeds.get(CROP, 0)
+        want = 2 * WAVE_TARGET - n_melons - have
+        if want > 0 and money - RESERVE >= SEED_COST[CROP]:
+            afford = max(0, (money - RESERVE) // SEED_COST[CROP])
+            market.append(["BUY_SEED", CROP, min(want, afford)])
 
-    n_hands = max(0, min(MAX_HANDS,
-                     math.ceil((len(plants) + len(empty)) / TILES_PER_UNIT) - 1))
+    # late-game wheat filler: farmer is idle from day 21 on, wheat's log
+    # curve barely moves with 100-200 extra units and it never touches the
+    # melon inventory. Two full 4-day cycles (plant 18 -> harvest 22,
+    # plant 22 -> harvest 26); planting stops at day 25 so every cycle
+    # finishes before the season ends.
+    n_wheat = sum(1 for (x, y, t) in plants if t["crop"] == "WHEAT")
+    if 18 <= day <= 25:
+        have_w = seeds.get("WHEAT", 0)
+        want_w = 12 - n_wheat - have_w
+        if want_w > 0 and money - RESERVE >= SEED_COST["WHEAT"]:
+            market.append(["BUY_SEED", "WHEAT", min(want_w, 6)])
+
+    n_hands = max(0, min(MAX_HANDS, math.ceil(n_melons / 8) - 1))
     for _ in range(n_hands - len(me["hands"])):
         cost = fib(me["hires_today"])
         if money - RESERVE < cost:
@@ -135,41 +166,46 @@ def agent(obs):
         market.append(["SELL", CROP, SELL_BATCH])
         n -= SELL_BATCH
 
+    n_w = shed.get("WHEAT", 0)
+    while n_w >= SELL_THRESHOLD and len(market) < MAX_MARKET_ORDERS:
+        market.append(["SELL", "WHEAT", SELL_BATCH])
+        n_w -= SELL_BATCH
+
+
     # ---------- farm tasks ----------
-    # ranks: 0 water survival (planted today / at-risk),
-    #        1 water final bonus day (age == max_yield_day: must be watered
-    #          before harvest or the last yield unit is lost),
-    #        2 harvest (yield complete: watered on the final day, or past it),
-    #        3 water bonus window, 4 water pre-window (spread the load),
-    #        5 plant, 6 dig
+    # ranks: 0 melon water (a missed day costs one $250 unit),
+    #        1 melon harvest (age 10 after watering, or 11+),
+    #        2 wheat water (melons first, wheat is filler),
+    #        3 wheat harvest, 4 melon plant (wave-gated), 5 wheat plant, 6 dig
     tasks = []
-    window_start = (MAX_YIELD_DAY[CROP] + 1) // 2
     for (x, y, t) in plants:
         age = day - t["planted_day"]
+        crop = t["crop"]
         if not t["watered_today"]:
-            if t["planted_day"] == day or t["consecutive_unwatered"] >= 1:
-                tasks.append((0, x, y, ["WATER"]))
-            elif CROP in ONGOING or age == MAX_YIELD_DAY[CROP]:
-                tasks.append((1, x, y, ["WATER"]))
-            elif CROP in ONGOING or window_start <= age < MAX_YIELD_DAY[CROP]:
-                tasks.append((3, x, y, ["WATER"]))
-            elif age < window_start:
-                tasks.append((4, x, y, ["WATER"]))
+            tasks.append((0 if crop == CROP else 2, x, y, ["WATER"]))
         ready = t["yield_units"] > 0 and (
-            CROP in ONGOING or
-            (age == MAX_YIELD_DAY[CROP] and t["watered_today"]) or
-            age > MAX_YIELD_DAY[CROP])
+            crop in ONGOING or
+            (age == MAX_YIELD_DAY[crop] and t["watered_today"]) or
+            age > MAX_YIELD_DAY[crop])
         if ready:
-            tasks.append((2, x, y, ["HARVEST"]))
-    # plant tasks always exist (per-day cap); picking is gated per zone below
+            tasks.append((1 if crop == CROP else 3, x, y, ["HARVEST"]))
     planted_today = sum(1 for (x, y, t) in plants if t["planted_day"] == day)
-    if have > 0 and obs["hour"] < 23 and planted_today < PLANT_CAP:
-        budget = min(len(empty), PLANT_CAP - planted_today)
+    can_plant = (_in_windows(day, HALF_A_WINDOWS + HALF_B_WINDOWS)
+                 and n_melons < 2 * WAVE_TARGET
+                 and obs["hour"] < 23 and planted_today < PLANT_CAP)
+    if can_plant:
+        budget = min(len(empty), 2 * WAVE_TARGET - n_melons)
         cx = cy = board / 2 - 0.5
         for (x, y) in sorted(empty, key=lambda c: abs(c[0] - cx) + abs(c[1] - cy))[:budget]:
-            tasks.append((5, x, y, ["PLANT", CROP]))
+            tasks.append((4, x, y, ["PLANT", CROP]))
+    if 18 <= day <= 25 and n_wheat < 12 and obs["hour"] < 23:
+        wheat_budget = min(len(empty), 12 - n_wheat)
+        cx = cy = board / 2 - 0.5
+        for (x, y) in sorted(empty, key=lambda c: -abs(c[0] - cx) - abs(c[1] - cy))[:wheat_budget]:
+            tasks.append((5, x, y, ["PLANT", "WHEAT"]))
     for (x, y) in weeds:
         tasks.append((6, x, y, ["DIG"]))
+
 
     ops = {"farmer": ["PASS"], "hands": []}
     used = set()
@@ -187,18 +223,12 @@ def agent(obs):
                 best = (key, rank, x, y, op)
         return best
 
-    # strict zones: units only service their own sub-zone. Cross-zone help costs
-    # more movement than it saves (walk there + back >> the action itself), so
-    # idle is cheaper than stealing. Ranks encode priority: survival water,
-    # final-bonus-day water, harvest, window water, pre-window water, plant,
-    # dig. Planting is gated per-zone: a unit only plants when its own zone's
-    # watering is caught up, so each zone expands at its own watering pace.
     for i, (name, pos) in enumerate(units):
         zone = zones[i]
         zone_unwatered = sum(1 for (x, y, t) in plants
                              if (x, y) in zone and not t["watered_today"])
         cands = (t for t in tasks if (t[1], t[2]) in zone
-                 and (t[0] != 5 or zone_unwatered <= 2))
+                 and (t[0] != 4 or zone_unwatered <= 1))
         pick = nearest(cands)
         if pick is None:
             action = ["PASS"]
