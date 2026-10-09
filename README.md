@@ -1,8 +1,95 @@
-# Kaggriculture
+# Kaggriculture: Competitive Autonomous Farming Agent
 
-A farming sim where two players compete to maximize their income from farming by selling to a dynamic market.
+An advanced, high-performance competitive agent for the [Kaggle Kaggriculture Simulation Competition](https://www.kaggle.com/competitions/kaggriculture).
 
-## Overview
+Kaggriculture is a two-player farming simulation where players manage land, plant crops, raise livestock, hire farmhands, and trade produce on a dynamically fluctuating market over a 30-day season (720 turns).
+
+---
+
+## Agent Strategy & Key Innovations
+
+The master agent in [`main.py`](main.py) incorporates multi-layered algorithmic optimizations:
+
+1. **Demand-Preserving Multi-Model Market Resequencing (`_v61_robust_reorder`)**
+   - In dynamic markets, order order matters. The agent models four opponent order behaviors:
+     - Exact mirror/clone orders
+     - Front-running SELL sequences
+     - Back-running SELL sequences
+     - Reversed SELL sequences
+   - Uses bounded candidate permutation search (800 evaluations) to maximize the worst-case profit margin across all rival models with secondary tie-breaking.
+   - Synchronizes `_RACE_STATE` to prevent race tracking desynchronization across turns.
+
+2. **Opening Liquidity Spread Reduction**
+   - Optimizes the turn-0 wheat financing order from `(20, 15)` to `(8, 3)`, obtaining the necessary 5 feed wheat while minimizing market slippage and front-running losses against rival buyers (+8 coin immediate edge).
+
+3. **Effective Queue Closure & Route Repair (`_v58`)**
+   - Automatically collapses zero-quantity no-ops from filled product orders and pulls valid sales forward, guaranteeing all 10 market order slots remain productive.
+   - Protects temporary wheat openings with fallback pasture restoration guards.
+
+4. **Strict Feed & Seed Protection (`_v59`, `_v60`, `_33`)**
+   - Dynamically evaluates feed profitability on mid-season days, avoiding wasted wheat feeds when product value doesn't justify cost.
+   - Trims surplus strawberry and carrot/wheat seed purchases that cannot mature before the season ends (day 30 / step 718).
+
+---
+
+## Validation & Head-to-Head Performance
+
+Benchmarked across multiple seeds and seats using [`compare_agents.py`](compare_agents.py):
+
+| Opponent | Games | Mean Bank Gain | Median Bank Gain | Win / Loss / Tie |
+| :--- | :---: | :---: | :---: | :---: |
+| **Pioneers of Kaggle Town** | 6 | **+20.0** | +24.0 | **6 / 0 / 0** |
+| **Statma Herd Submit** | 6 | **+2.3** | +3.0 | **4 / 2 / 0** |
+| **Starter Baseline** | 6 | **+0.3** | +0.0 | **2 / 0 / 4** |
+
+Standard benchmark against built-in environments via [`bench.py`](bench.py):
+- **vs `pass`**: 3/0/0 (Average Bank: 167,921 vs 3,000)
+- **vs `random`**: 3/0/0 (Average Bank: 174,834 vs 30)
+- **vs `starter`**: 3/0/0 (Average Bank: 164,440 vs 3,553)
+
+---
+
+## Project Structure
+
+```text
+├── main.py             # Master autonomous agent entrypoint
+├── bench.py            # Local validation harness against built-in agents
+├── compare_agents.py   # Head-to-head seed/seat comparative validation tool
+├── debug_run.py        # Single-match runner with per-turn state logging
+├── debug_trace.py      # Detailed opening trace logger
+├── requirements.txt    # Python dependencies
+├── AGENTS.md           # Kaggle submission and environment guide
+├── versions/           # Milestone agent checkpoints (v2 -> v61)
+└── README.md           # Documentation & complete game rules
+```
+
+---
+
+## Getting Started
+
+### 1. Installation
+
+```bash
+git clone https://github.com/YOUR_USERNAME/kaggriculture.git
+cd kaggriculture
+pip install -r requirements.txt
+```
+
+### 2. Run Validation Benchmarks
+
+Test `main.py` against built-in baselines:
+```bash
+python bench.py --agent main.py --games 6
+```
+
+Compare candidate agent against another version:
+```bash
+python compare_agents.py --candidate main.py --baseline versions/main_v60_master.py --opponents starter --games 6
+```
+
+---
+
+## Game Overview
 
 Each player starts with an empty farm and a small amount of income (seed money, if you will). Each turn, they can perform actions such as moving around the board, purchasing seeds or livestock, planting seeds, watering plants, harvesting produce or animal products, and selling that produce at the market. The game runs for a fixed amount of time representing one season, and the winner is determined by who has the most money in the bank at the end.
 

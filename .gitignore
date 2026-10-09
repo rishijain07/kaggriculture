@@ -1,8 +1,30 @@
+# Virtual environments
 .venv/
+env/
+venv/
+
+# Python bytecode & cache
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Local game artifacts & analysis
 replay.json
 replays/
 logs/
 kaggriculture-data/
 submission.tar.gz
+
+# Local scratch and working output
+scratch/
+scratch_*.py
+x560_output/
+
+# External reference archives & downloaded notebooks
+reference_*/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
